@@ -13,43 +13,22 @@ if (!(TraceEventSession.IsElevated() ?? false))
 var generatorTimingInfo = new Dictionary<int, ProcessInfo>();
 
 // create a new trace session
-using var session = new TraceEventSession("Microsoft-CodeAnalysis-Generators-Trace-Session");
+using var session = new TraceEventSession("Microsoft-NET-SourceGeneration-Trace-Session");
 
 // ensure we also dispose the session if the user Control + C's
 Console.CancelKeyPress += (s, e) => session.Dispose();
 
-// capture the generator driver run time
-session.Source.Dynamic.AddCallbackForProviderEvent("Microsoft-CodeAnalysis-General", "GeneratorDriverRunTime/Stop", (TraceEvent data) =>
-{
-    // We store the overall execution time in the first slot of the info.
-    EnsureProcessSlot(data.ProcessID);
-    generatorTimingInfo[data.ProcessID].generators[0].executionTimes.Add((long)data.PayloadByName("elapsedTicks"));
-});
-
 // capture the individual generator run times
-session.Source.Dynamic.AddCallbackForProviderEvent("Microsoft-CodeAnalysis-General", "SingleGeneratorRunTime/Stop", (TraceEvent data) =>
+session.Source.Dynamic.AddCallbackForProviderEvent("Microsoft-NET-SourceGeneration", "GeneratorPhaseRunTime/Stop", (TraceEvent data) =>
 {
-    EnsureProcessSlot(data.ProcessID);
+    var info = GetGeneratorInfo(data);
 
-    var generatorName = (string)data.PayloadByName("generatorName");
-    var assemblyPath = (string)data.PayloadByName("assemblyPath");
-    var ticks = (long)data.PayloadByName("elapsedTicks");
-
-    var processInfo = generatorTimingInfo[data.ProcessID];
-
-    var info = processInfo.generators.SingleOrDefault(i => i.name == generatorName && i.assembly == assemblyPath);
-    if (info is null)
-    {
-        info = new GeneratorInfo(generatorName, assemblyPath, new List<long>() { });
-        processInfo.generators.Add(info);
-    }
-
-    info.executionTimes.Add((long)data.PayloadByName("elapsedTicks"));
+    info.times.Add((long)data.PayloadByName("elapsedTicks"));
 });
 
 Console.WriteLine("Starting Collection. Waiting for data...");
 _ = RenderData();
-session.EnableProvider("Microsoft-CodeAnalysis-General");
+session.EnableProvider("Microsoft-NET-SourceGeneration");
 session.Source.Process();
 
 void EnsureProcessSlot(int processID)
@@ -58,8 +37,28 @@ void EnsureProcessSlot(int processID)
     {
         var processName = Process.GetProcessById(processID).ProcessName;
 
-        generatorTimingInfo[processID] = new ProcessInfo(processName, new List<GeneratorInfo>() { new GeneratorInfo("GeneratorDriver", "", new List<long>() { }) });
+        generatorTimingInfo[processID] = new ProcessInfo(processName, new List<GeneratorInfo>());
     }
+}
+
+GeneratorInfo GetGeneratorInfo(TraceEvent data)
+{
+    EnsureProcessSlot(data.ProcessID);
+
+    var generatorName = (string)data.PayloadByName("generatorName");
+    var assemblyPath = (string)data.PayloadByName("assemblyPath");
+    var phase = (string)data.PayloadByName("phase");
+
+    var processInfo = generatorTimingInfo[data.ProcessID];
+
+    var info = processInfo.generators.SingleOrDefault(i => i.name == generatorName && i.assembly == assemblyPath && i.phase == phase);
+    if (info is null)
+    {
+        info = new GeneratorInfo(generatorName, assemblyPath, phase, new List<long>() { });
+        processInfo.generators.Add(info);
+    }
+
+    return info;
 }
 
 async Task RenderData()
@@ -93,7 +92,8 @@ async Task RenderData()
 
             table = new Table();
             table.AddColumn("Generator");
-            table.AddColumn("Last Run Time (ms)");
+            table.AddColumn("Phase");
+            table.AddColumn("Last Time (ms)");
             table.AddColumn("Average Time (ms)");
             table.AddColumn("Cumulative Time");
             table.AddColumn("Count");
@@ -108,17 +108,18 @@ async Task RenderData()
 
             void RenderRow(GeneratorInfo info)
             {
-                if (info.executionTimes.Count == 0)
+                if (info.times.Count == 0)
                 {
                     table.AddEmptyRow();
                     return;
                 }
 
-                var lastRun = TimeSpan.FromTicks(info.executionTimes.Last()).TotalMilliseconds.ToString();
-                var average = TimeSpan.FromTicks((long)info.executionTimes.Average()).TotalMilliseconds.ToString();
-                var cumulative = TimeSpan.FromTicks(info.executionTimes.Sum()).ToString();
+                var phaseLastRun = TimeSpan.FromTicks(info.times.Last()).TotalMilliseconds.ToString();
+                var phaseAverage = TimeSpan.FromTicks((long)info.times.Average()).TotalMilliseconds.ToString();
+                var phaseCumulative = TimeSpan.FromTicks(info.times.Sum()).ToString();
+                var phaseCount = info.times.Count.ToString();
 
-                table.AddRow(info.name, lastRun, average, cumulative, info.executionTimes.Count.ToString());
+                table.AddRow(info.name, info.phase, phaseLastRun, phaseAverage, phaseCumulative, phaseCount);
             }
         }
     }
@@ -126,5 +127,5 @@ async Task RenderData()
     void WriteLine(string s) => Console.WriteLine(s.PadRight(Console.BufferWidth));
 }
 
-record GeneratorInfo(string name, string assembly, List<long> executionTimes);
+record GeneratorInfo(string name, string assembly, string phase, List<long> times);
 record ProcessInfo(string name, List<GeneratorInfo> generators);
